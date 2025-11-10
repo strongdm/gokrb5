@@ -20,6 +20,7 @@ type Settings struct {
 	maxClockSkew       time.Duration
 	logger             *log.Logger
 	sessionMgr         SessionMgr
+	tgtSessionKey      *types.EncryptionKey // For user-to-user authentication
 }
 
 // NewSettings creates a new service Settings.
@@ -149,6 +150,22 @@ func SessionManager(sm SessionMgr) func(*Settings) {
 // SessionManager returns any configured session manager.
 func (s *Settings) SessionManager() SessionMgr {
 	return s.sessionMgr
+}
+
+// TGTSessionKey used to configure service side with a TGT session key for user-to-user authentication.
+// When set, the service will use this session key to decrypt tickets in user-to-user authentication
+// scenarios where the APOptionUseSessionKey flag is set in the AP_REQ.
+//
+// s := NewSettings(kt, TGTSessionKey(sessionKey))
+func TGTSessionKey(key types.EncryptionKey) func(*Settings) {
+	return func(s *Settings) {
+		s.tgtSessionKey = &key
+	}
+}
+
+// TGTSessionKey returns the TGT session key for user-to-user authentication if configured.
+func (s *Settings) TGTSessionKey() *types.EncryptionKey {
+	return s.tgtSessionKey
 }
 
 // SessionMgr must provide a ways to:

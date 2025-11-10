@@ -106,3 +106,57 @@ func (cl *Client) GetServiceTicket(spn string) (messages.Ticket, types.Encryptio
 	}
 	return tgsRep.Ticket, tgsRep.DecryptedEncPart.Key, nil
 }
+
+// GetUser2UserServiceTicket makes a request to get a service ticket for user-to-user authentication
+// as defined in RFC 4120 Section 3.7 (https://tools.ietf.org/html/rfc4120#section-3.7) and
+// https://datatracker.ietf.org/doc/html/draft-swift-win2k-krb-user2user-03
+//
+// This method requests a service ticket that is encrypted with the session key from the server's TGT
+// instead of the server's long-term key. This enables authentication scenarios where the server does
+// not have access to its long-term credentials.
+//
+// Parameters:
+//   - spn: Service Principal Name in format <SERVICE>/<FQDN> (e.g., HTTP/www.example.com)
+//   - serverTGT: The server's TGT ticket to be included in the additional-tickets field
+//
+// The ticket will be added to the client's ticket cache.
+func (cl *Client) GetUser2UserServiceTicket(spn string, serverTGT messages.Ticket) (messages.Ticket, types.EncryptionKey, error) {
+	var tkt messages.Ticket
+	var skey types.EncryptionKey
+
+	princ := types.NewPrincipalName(nametype.KRB_NT_PRINCIPAL, spn)
+	realm := cl.spnRealm(princ)
+
+	// if we don't know the SPN's realm, ask the client realm's KDC
+	if realm == "" {
+		realm = cl.Credentials.Realm()
+	}
+
+	tgt, sessionKey, err := cl.sessionTGT(realm)
+	if err != nil {
+		return tkt, skey, err
+	}
+
+	// Create a User2User TGS-REQ with the server's TGT in additional-tickets field
+	tgsReq, err := messages.NewUser2UserTGSReq(
+		cl.Credentials.CName(),
+		realm,
+		cl.Config,
+		tgt,
+		sessionKey,
+		princ,
+		false, // renewal
+		serverTGT,
+	)
+	if err != nil {
+		return tkt, skey, krberror.Errorf(err, krberror.KRBMsgError, "error generating User2User TGS_REQ")
+	}
+
+	// Exchange the TGS-REQ with the KDC
+	_, tgsRep, err := cl.TGSExchange(tgsReq, realm, tgt, sessionKey, 0)
+	if err != nil {
+		return tkt, skey, err
+	}
+
+	return tgsRep.Ticket, tgsRep.DecryptedEncPart.Key, nil
+}
