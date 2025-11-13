@@ -1,6 +1,7 @@
 package gssapi
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/hex"
 	"testing"
@@ -34,7 +35,7 @@ func getSessionKey() types.EncryptionKey {
 func getChallengeReference() *WrapToken {
 	challenge, _ := hex.DecodeString(testChallengeFromAcceptor)
 	return &WrapToken{
-		Flags:     0x01,
+		Flags:     WrapTokenFlagSentByAcceptor,
 		EC:        12,
 		RRC:       0,
 		SndSeqNum: binary.BigEndian.Uint64(challenge[8:16]),
@@ -188,4 +189,308 @@ func TestNewInitiatorTokenSignatureAndMarshalling(t *testing.T) {
 	token, tErr := NewInitiatorWrapToken([]byte{0x01, 0x01, 0x00, 0x00}, getSessionKey())
 	assert.Nil(t, tErr, "Unexpected error.")
 	assert.Equal(t, getResponseReference(), token, "Token failed to be marshalled to the expected bytes.")
+}
+
+func TestEncryptPayload(t *testing.T) {
+	t.Parallel()
+	payload := []byte("Hello, World!")
+	key := getSessionKey()
+
+	// Create a wrap token and encrypt it
+	token := &WrapToken{
+		Flags:   WrapTokenFlagSealed,
+		Payload: payload,
+	}
+	err := token.EncryptPayload(key, initiatorSeal)
+	assert.Nil(t, err, "Error encrypting payload")
+	assert.NotNil(t, token, "Token should not be nil")
+	assert.True(t, token.Flags&WrapTokenFlagSealed != 0, "Sealed flag should be set")
+	assert.NotNil(t, token.CheckSum, "Checksum should be set after encryption")
+	assert.NotEqual(t, payload, token.Payload, "Payload should be encrypted")
+}
+
+func TestEncryptDecryptPayload(t *testing.T) {
+	t.Parallel()
+	originalPayload := []byte("This is a test payload for encryption")
+	key := getSessionKey()
+
+	// Create a wrap token and encrypt it
+	token := &WrapToken{
+		Flags:   WrapTokenFlagSealed,
+		Payload: originalPayload,
+	}
+	err := token.EncryptPayload(key, initiatorSeal)
+	assert.Nil(t, err, "Error encrypting payload")
+
+	// Marshal the token
+	tokenBytes, err := token.Marshal()
+	assert.Nil(t, err, "Error marshalling token")
+
+	// Unmarshal into a new token
+	var receivedToken WrapToken
+	err = receivedToken.Unmarshal(tokenBytes, false)
+	assert.Nil(t, err, "Error unmarshalling token")
+	assert.True(t, receivedToken.Flags&WrapTokenFlagSealed != 0, "Sealed flag should be set in unmarshalled token")
+
+	// Decrypt the payload
+	err = receivedToken.DecryptPayload(key, initiatorSeal)
+	assert.Nil(t, err, "Error decrypting payload")
+	assert.Equal(t, originalPayload, receivedToken.Payload, "Decrypted payload should match original")
+}
+
+func TestEncryptPayloadErrors(t *testing.T) {
+	t.Parallel()
+	key := getSessionKey()
+
+	// Test error when payload is not set
+	token := &WrapToken{Flags: WrapTokenFlagSealed}
+	err := token.EncryptPayload(key, initiatorSeal)
+	assert.NotNil(t, err, "Should return error when payload is not set")
+	assert.Contains(t, err.Error(), "payload has not been set")
+
+	// Test error when sealed flag is not set
+	token = &WrapToken{Payload: []byte("test")}
+	err = token.EncryptPayload(key, initiatorSeal)
+	assert.NotNil(t, err, "Should return error when sealed flag is not set")
+	assert.Contains(t, err.Error(), "token is not sealed")
+
+	// Test error when checksum is already set
+	token = &WrapToken{
+		Flags:    WrapTokenFlagSealed,
+		Payload:  []byte("test"),
+		CheckSum: []byte("checksum"),
+	}
+	err = token.EncryptPayload(key, initiatorSeal)
+	assert.NotNil(t, err, "Should return error when checksum is already set")
+	assert.Contains(t, err.Error(), "checksum has already been computed")
+}
+
+func TestDecryptPayloadErrors(t *testing.T) {
+	t.Parallel()
+	key := getSessionKey()
+
+	// Test error when payload is not set
+	token := &WrapToken{Flags: WrapTokenFlagSealed}
+	err := token.DecryptPayload(key, acceptorSeal)
+	assert.NotNil(t, err, "Should return error when payload is not set")
+	assert.Contains(t, err.Error(), "payload has not been set")
+
+	// Test error when sealed flag is not set
+	token = &WrapToken{Payload: []byte("test")}
+	err = token.DecryptPayload(key, acceptorSeal)
+	assert.NotNil(t, err, "Should return error when sealed flag is not set")
+	assert.Contains(t, err.Error(), "token is not sealed")
+}
+
+func TestRotateRight(t *testing.T) {
+	t.Parallel()
+	data := []byte{1, 2, 3, 4, 5}
+
+	// Test rotation by 0
+	result := rotateRight(data, 0)
+	assert.Equal(t, data, result, "Rotation by 0 should not change data")
+
+	// Test rotation by 2
+	result = rotateRight(data, 2)
+	expected := []byte{4, 5, 1, 2, 3}
+	assert.Equal(t, expected, result, "Rotation by 2 not as expected")
+
+	// Test rotation by length (should be same as original)
+	result = rotateRight(data, 5)
+	assert.Equal(t, data, result, "Rotation by length should return original")
+}
+
+func TestRotateLeft(t *testing.T) {
+	t.Parallel()
+	data := []byte{1, 2, 3, 4, 5}
+
+	// Test rotation by 0
+	result := rotateLeft(data, 0)
+	assert.Equal(t, data, result, "Rotation by 0 should not change data")
+
+	// Test rotation by 2
+	result = rotateLeft(data, 2)
+	expected := []byte{3, 4, 5, 1, 2}
+	assert.Equal(t, expected, result, "Rotation by 2 not as expected")
+
+	// Test rotation by length (should be same as original)
+	result = rotateLeft(data, 5)
+	assert.Equal(t, data, result, "Rotation by length should return original")
+}
+
+func TestEncryptDecryptWithDifferentPayloads(t *testing.T) {
+	t.Parallel()
+	key := getSessionKey()
+
+	testCases := []struct {
+		name    string
+		payload []byte
+	}{
+		{"Empty payload", []byte{}},
+		{"Small payload", []byte("Hi")},
+		{"Medium payload", []byte("This is a medium sized test payload")},
+		{"Large payload", bytes.Repeat([]byte("A"), 1000)},
+		{"Binary data", []byte{0x00, 0xFF, 0xAA, 0x55, 0xDE, 0xAD, 0xBE, 0xEF}},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Create a wrap token and encrypt it
+			token := &WrapToken{
+				Flags:   WrapTokenFlagSealed,
+				Payload: tc.payload,
+			}
+			err := token.EncryptPayload(key, initiatorSeal)
+			assert.Nil(t, err, "Error encrypting payload")
+
+			// Marshal and unmarshal
+			tokenBytes, err := token.Marshal()
+			assert.Nil(t, err, "Error marshalling token")
+
+			var receivedToken WrapToken
+			err = receivedToken.Unmarshal(tokenBytes, false)
+			assert.Nil(t, err, "Error unmarshalling token")
+
+			// Decrypt
+			err = receivedToken.DecryptPayload(key, initiatorSeal)
+			assert.Nil(t, err, "Error decrypting payload")
+			assert.Equal(t, tc.payload, receivedToken.Payload, "Payload mismatch for "+tc.name)
+		})
+	}
+}
+
+func TestEncryptPayloadWithZeroEC(t *testing.T) {
+	t.Parallel()
+	payload := []byte("Test payload with zero EC")
+	key := getSessionKey()
+
+	// Create token with EC=0 (no filler bytes)
+	token := &WrapToken{
+		Flags:   WrapTokenFlagSealed,
+		EC:      0, // Zero filler bytes
+		RRC:     0,
+		Payload: payload,
+	}
+
+	// Encrypt the payload
+	err := token.EncryptPayload(key, initiatorSeal)
+	assert.Nil(t, err, "Error encrypting payload with zero EC")
+	assert.NotNil(t, token.CheckSum, "Checksum should be set after encryption")
+	assert.NotEqual(t, payload, token.Payload, "Payload should be encrypted")
+}
+
+func TestEncryptDecryptWithZeroEC(t *testing.T) {
+	t.Parallel()
+	originalPayload := []byte("This is a test with EC=0")
+	key := getSessionKey()
+
+	// Create token with EC=0
+	token := &WrapToken{
+		Flags:     WrapTokenFlagSealed,
+		EC:        0, // No filler bytes
+		RRC:       0,
+		SndSeqNum: 12345,
+		Payload:   originalPayload,
+	}
+
+	// Encrypt
+	err := token.EncryptPayload(key, initiatorSeal)
+	assert.Nil(t, err, "Error encrypting with zero EC")
+
+	// Marshal the token
+	tokenBytes, err := token.Marshal()
+	assert.Nil(t, err, "Error marshalling token")
+
+	// Unmarshal into new token
+	var receivedToken WrapToken
+	err = receivedToken.Unmarshal(tokenBytes, false)
+	assert.Nil(t, err, "Error unmarshalling token")
+	assert.Equal(t, uint16(0), receivedToken.EC, "EC should be 0 in unmarshalled token")
+	assert.True(t, receivedToken.Flags&WrapTokenFlagSealed != 0, "Sealed flag should be set")
+
+	// Decrypt
+	err = receivedToken.DecryptPayload(key, initiatorSeal)
+	assert.Nil(t, err, "Error decrypting with zero EC")
+	assert.Equal(t, originalPayload, receivedToken.Payload, "Decrypted payload should match original")
+}
+
+func TestEncryptDecryptWithZeroECVariousPayloads(t *testing.T) {
+	t.Parallel()
+	key := getSessionKey()
+
+	testCases := []struct {
+		name    string
+		payload []byte
+	}{
+		{"Empty with EC=0", []byte{}},
+		{"Small with EC=0", []byte("Hi")},
+		{"Medium with EC=0", []byte("Medium sized payload without filler bytes")},
+		{"Large with EC=0", bytes.Repeat([]byte("B"), 500)},
+		{"Binary with EC=0", []byte{0xFF, 0xEE, 0xDD, 0xCC, 0xBB, 0xAA}},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Create token with EC=0
+			token := &WrapToken{
+				Flags:     WrapTokenFlagSealed,
+				EC:        0,
+				RRC:       0,
+				SndSeqNum: 0,
+				Payload:   tc.payload,
+			}
+
+			// Encrypt
+			err := token.EncryptPayload(key, initiatorSeal)
+			assert.Nil(t, err, "Error encrypting")
+
+			// Marshal and unmarshal
+			tokenBytes, err := token.Marshal()
+			assert.Nil(t, err, "Error marshalling")
+
+			var receivedToken WrapToken
+			err = receivedToken.Unmarshal(tokenBytes, false)
+			assert.Nil(t, err, "Error unmarshalling")
+			assert.Equal(t, uint16(0), receivedToken.EC, "EC should remain 0")
+
+			// Decrypt
+			err = receivedToken.DecryptPayload(key, initiatorSeal)
+			assert.Nil(t, err, "Error decrypting")
+			assert.Equal(t, tc.payload, receivedToken.Payload, "Payload mismatch for "+tc.name)
+		})
+	}
+}
+
+func TestEncryptWithZeroECAndNonZeroRRC(t *testing.T) {
+	t.Parallel()
+	payload := []byte("Test with EC=0 and RRC rotation")
+	key := getSessionKey()
+
+	// Create token with EC=0 but non-zero RRC
+	token := &WrapToken{
+		Flags:     WrapTokenFlagSealed,
+		EC:        0,
+		RRC:       28, // Non-zero rotation
+		SndSeqNum: 99999,
+		Payload:   payload,
+	}
+
+	// Encrypt
+	err := token.EncryptPayload(key, initiatorSeal)
+	assert.Nil(t, err, "Error encrypting with EC=0 and RRC=28")
+
+	// Marshal and unmarshal
+	tokenBytes, err := token.Marshal()
+	assert.Nil(t, err, "Error marshalling")
+
+	var receivedToken WrapToken
+	err = receivedToken.Unmarshal(tokenBytes, false)
+	assert.Nil(t, err, "Error unmarshalling")
+	assert.Equal(t, uint16(0), receivedToken.EC, "EC should be 0")
+	assert.Equal(t, uint16(28), receivedToken.RRC, "RRC should be preserved")
+
+	// Decrypt
+	err = receivedToken.DecryptPayload(key, initiatorSeal)
+	assert.Nil(t, err, "Error decrypting with EC=0 and RRC=28")
+	assert.Equal(t, payload, receivedToken.Payload, "Decrypted payload should match original")
 }
