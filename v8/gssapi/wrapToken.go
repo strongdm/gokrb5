@@ -25,8 +25,8 @@ const (
 // WrapToken flags
 const (
 	WrapTokenFlagSentByAcceptor = 1 << iota // Indicates sender is context acceptor
-	WrapTokenFlagSealed                      // Indicates confidentiality is provided
-	WrapTokenFlagAcceptorSubkey              // Subkey asserted by context acceptor
+	WrapTokenFlagSealed                     // Indicates confidentiality is provided
+	WrapTokenFlagAcceptorSubkey             // Subkey asserted by context acceptor
 )
 
 // WrapToken represents a GSS API Wrap token, as defined in RFC 4121.
@@ -70,18 +70,9 @@ func (wt *WrapToken) Marshal() ([]byte, error) {
 		return nil, errors.New("payload has not been set")
 	}
 
-	pldOffset := HdrLen                    // Offset of the payload in the token
-	chkSOffset := HdrLen + len(wt.Payload) // Offset of the checksum in the token
-
-	bytes := make([]byte, chkSOffset+int(wt.EC))
-	copy(bytes[0:], getGssWrapTokenId()[:])
-	bytes[2] = wt.Flags
-	bytes[3] = FillerByte
-	binary.BigEndian.PutUint16(bytes[4:6], wt.EC)
-	binary.BigEndian.PutUint16(bytes[6:8], wt.RRC)
-	binary.BigEndian.PutUint64(bytes[8:16], wt.SndSeqNum)
-	copy(bytes[pldOffset:], wt.Payload)
-	copy(bytes[chkSOffset:], wt.CheckSum)
+	bytes := wt.getWrapTokenHeader(wt.EC, wt.RRC)
+	bytes = append(bytes, wt.Payload...)
+	bytes = append(bytes, wt.CheckSum...)
 	return bytes, nil
 }
 
