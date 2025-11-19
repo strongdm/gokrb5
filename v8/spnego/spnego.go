@@ -80,8 +80,8 @@ func (s *SPNEGO) AcceptSecContext(ct gssapi.ContextToken) (bool, context.Context
 	if t.Resp {
 		oid = t.NegTokenResp.SupportedMech
 	}
-	if !(oid.Equal(gssapi.OIDKRB5.OID()) || oid.Equal(gssapi.OIDMSLegacyKRB5.OID())) {
-		return false, ctx, gssapi.Status{Code: gssapi.StatusDefectiveToken, Message: "SPNEGO OID of MechToken is not of type KRB5"}
+	if !(oid.Equal(gssapi.OIDKRB5.OID()) || oid.Equal(gssapi.OIDMSLegacyKRB5.OID()) || oid.Equal(gssapi.OIDKRB5User2User.OID())) {
+		return false, ctx, gssapi.Status{Code: gssapi.StatusDefectiveToken, Message: "SPNEGO OID of MechToken is not of type KRB5 or KRB5User2User"}
 	}
 	// Flags in the NegInit must be used 	t.NegTokenInit.ReqFlags
 	ok, status := t.Verify()

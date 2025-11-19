@@ -13,6 +13,7 @@ import (
 	"github.com/jcmturner/gokrb5/v8/credentials"
 	"github.com/jcmturner/gokrb5/v8/gssapi"
 	"github.com/jcmturner/gokrb5/v8/iana/chksumtype"
+	"github.com/jcmturner/gokrb5/v8/iana/flags"
 	"github.com/jcmturner/gokrb5/v8/iana/msgtype"
 	"github.com/jcmturner/gokrb5/v8/krberror"
 	"github.com/jcmturner/gokrb5/v8/messages"
@@ -22,9 +23,11 @@ import (
 
 // GSSAPI KRB5 MechToken IDs.
 const (
-	TOK_ID_KRB_AP_REQ = "0100"
-	TOK_ID_KRB_AP_REP = "0200"
-	TOK_ID_KRB_ERROR  = "0300"
+	TOK_ID_KRB_AP_REQ  = "0100"
+	TOK_ID_KRB_AP_REP  = "0200"
+	TOK_ID_KRB_ERROR   = "0300"
+	TOK_ID_KRB_TGT_REQ = "0400"
+	TOK_ID_KRB_TGT_REP = "0401"
 )
 
 // KRB5Token context token implementation for GSSAPI.
@@ -34,6 +37,8 @@ type KRB5Token struct {
 	APReq    messages.APReq
 	APRep    messages.APRep
 	KRBError messages.KRBError
+	TGTReq   messages.TGTReq
+	TGTRep   messages.TGTRep
 	settings *service.Settings
 	context  context.Context
 }
@@ -55,6 +60,16 @@ func (m *KRB5Token) Marshal() ([]byte, error) {
 		return []byte{}, errors.New("marshal of AP_REP GSSAPI MechToken not supported by gokrb5")
 	case TOK_ID_KRB_ERROR:
 		return []byte{}, errors.New("marshal of KRB_ERROR GSSAPI MechToken not supported by gokrb5")
+	case TOK_ID_KRB_TGT_REQ:
+		tb, err = m.TGTReq.Marshal()
+		if err != nil {
+			return []byte{}, fmt.Errorf("error marshalling TGT_REQ for MechToken: %v", err)
+		}
+	case TOK_ID_KRB_TGT_REP:
+		tb, err = m.TGTRep.Marshal()
+		if err != nil {
+			return []byte{}, fmt.Errorf("error marshalling TGT_REP for MechToken: %v", err)
+		}
 	}
 	if err != nil {
 		return []byte{}, fmt.Errorf("error mashalling kerberos message within mech token: %v", err)
@@ -70,8 +85,9 @@ func (m *KRB5Token) Unmarshal(b []byte) error {
 	if err != nil {
 		return fmt.Errorf("error unmarshalling KRB5Token OID: %v", err)
 	}
-	if !oid.Equal(gssapi.OIDKRB5.OID()) {
-		return fmt.Errorf("error unmarshalling KRB5Token, OID is %s not %s", oid.String(), gssapi.OIDKRB5.OID().String())
+	// Accept both standard Kerberos OID and User2User OID
+	if !oid.Equal(gssapi.OIDKRB5.OID()) && !oid.Equal(gssapi.OIDKRB5User2User.OID()) {
+		return fmt.Errorf("error unmarshalling KRB5Token, OID is %s, expected %s or %s", oid.String(), gssapi.OIDKRB5.OID().String(), gssapi.OIDKRB5User2User.OID().String())
 	}
 	m.OID = oid
 	if len(r) < 2 {
@@ -100,6 +116,20 @@ func (m *KRB5Token) Unmarshal(b []byte) error {
 			return fmt.Errorf("error unmarshalling KRB5Token KRBError: %v", err)
 		}
 		m.KRBError = a
+	case TOK_ID_KRB_TGT_REQ:
+		var a messages.TGTReq
+		err = a.Unmarshal(r[2:])
+		if err != nil {
+			return fmt.Errorf("error unmarshalling KRB5Token TGT_REQ: %v", err)
+		}
+		m.TGTReq = a
+	case TOK_ID_KRB_TGT_REP:
+		var a messages.TGTRep
+		err = a.Unmarshal(r[2:])
+		if err != nil {
+			return fmt.Errorf("error unmarshalling KRB5Token TGT_REP: %v", err)
+		}
+		m.TGTRep = a
 	}
 	return nil
 }
@@ -127,6 +157,16 @@ func (m *KRB5Token) Verify() (bool, gssapi.Status) {
 			return false, gssapi.Status{Code: gssapi.StatusDefectiveToken, Message: "KRB5_Error token not valid"}
 		}
 		return true, gssapi.Status{Code: gssapi.StatusUnavailable}
+	case TOK_ID_KRB_TGT_REQ:
+		if m.TGTReq.MsgType != msgtype.KRB_TGT_REQ {
+			return false, gssapi.Status{Code: gssapi.StatusDefectiveToken, Message: "KRB5_TGT_REQ token not valid"}
+		}
+		return true, gssapi.Status{Code: gssapi.StatusComplete}
+	case TOK_ID_KRB_TGT_REP:
+		if m.TGTRep.MsgType != msgtype.KRB_TGT_REP {
+			return false, gssapi.Status{Code: gssapi.StatusDefectiveToken, Message: "KRB5_TGT_REP token not valid"}
+		}
+		return true, gssapi.Status{Code: gssapi.StatusComplete}
 	}
 	return false, gssapi.Status{Code: gssapi.StatusDefectiveToken, Message: "unknown TOK_ID in KRB5 token"}
 }
@@ -150,6 +190,22 @@ func (m *KRB5Token) IsAPRep() bool {
 // IsKRBError tests if the MechToken contains an KRB_ERROR.
 func (m *KRB5Token) IsKRBError() bool {
 	if hex.EncodeToString(m.tokID) == TOK_ID_KRB_ERROR {
+		return true
+	}
+	return false
+}
+
+// IsTGTReq tests if the MechToken contains a TGT_REQ.
+func (m *KRB5Token) IsTGTReq() bool {
+	if hex.EncodeToString(m.tokID) == TOK_ID_KRB_TGT_REQ {
+		return true
+	}
+	return false
+}
+
+// IsTGTRep tests if the MechToken contains a TGT_REP.
+func (m *KRB5Token) IsTGTRep() bool {
+	if hex.EncodeToString(m.tokID) == TOK_ID_KRB_TGT_REP {
 		return true
 	}
 	return false
@@ -183,6 +239,57 @@ func NewKRB5TokenAPREQ(cl *client.Client, tkt messages.Ticket, sessionKey types.
 	for _, o := range APOptions {
 		types.SetFlag(&APReq.APOptions, o)
 	}
+	m.APReq = APReq
+	return m, nil
+}
+
+// NewKRB5TokenTGTREQ creates a new KRB5 token with TGT_REQ for user-to-user authentication
+func NewKRB5TokenTGTREQ(sname types.PrincipalName, realm string) (KRB5Token, error) {
+	var m KRB5Token
+	m.OID = gssapi.OIDKRB5User2User.OID()
+	tb, _ := hex.DecodeString(TOK_ID_KRB_TGT_REQ)
+	m.tokID = tb
+	m.TGTReq = messages.NewTGTReq(sname, realm)
+	return m, nil
+}
+
+// NewKRB5TokenTGTREP creates a new KRB5 token with TGT_REP for user-to-user authentication
+func NewKRB5TokenTGTREP(ticket messages.Ticket, sname types.PrincipalName) (KRB5Token, error) {
+	var m KRB5Token
+	m.OID = gssapi.OIDKRB5User2User.OID()
+	tb, _ := hex.DecodeString(TOK_ID_KRB_TGT_REP)
+	m.tokID = tb
+	m.TGTRep = messages.NewTGTRep(ticket, sname)
+	return m, nil
+}
+
+// NewKRB5TokenUser2UserAPREQ creates a new KRB5 token with AP_REQ for user-to-user authentication
+// This function creates an AP_REQ with the APOptionUseSessionKey flag set, which instructs the
+// server to decrypt the ticket using the session key from its TGT rather than its long-term key.
+// It also sets APOptionMutualRequired to enable mutual authentication between client and server.
+func NewKRB5TokenUser2UserAPREQ(cl *client.Client, tkt messages.Ticket, sessionKey types.EncryptionKey, GSSAPIFlags []int) (KRB5Token, error) {
+	var m KRB5Token
+	m.OID = gssapi.OIDKRB5User2User.OID()
+	tb, _ := hex.DecodeString(TOK_ID_KRB_AP_REQ)
+	m.tokID = tb
+
+	auth, err := krb5TokenAuthenticator(cl.Credentials, GSSAPIFlags)
+	if err != nil {
+		return m, err
+	}
+	APReq, err := messages.NewAPReq(
+		tkt,
+		sessionKey,
+		auth,
+	)
+	if err != nil {
+		return m, err
+	}
+	// Set APOptionUseSessionKey - required for user-to-user authentication
+	// This tells the server to decrypt the ticket using its TGT session key
+	types.SetFlag(&APReq.APOptions, flags.APOptionUseSessionKey)
+	// Set APOptionMutualRequired for mutual authentication
+	types.SetFlag(&APReq.APOptions, flags.APOptionMutualRequired)
 	m.APReq = APReq
 	return m, nil
 }

@@ -9,6 +9,7 @@ import (
 	"github.com/jcmturner/gokrb5/v8/client"
 	"github.com/jcmturner/gokrb5/v8/credentials"
 	"github.com/jcmturner/gokrb5/v8/gssapi"
+	"github.com/jcmturner/gokrb5/v8/iana/flags"
 	"github.com/jcmturner/gokrb5/v8/iana/msgtype"
 	"github.com/jcmturner/gokrb5/v8/iana/nametype"
 	"github.com/jcmturner/gokrb5/v8/messages"
@@ -143,4 +144,179 @@ func TestNewAPREQKRB5Token_and_Marshal(t *testing.T) {
 	assert.Equal(t, testdata.TEST_REALM, mt.APReq.Ticket.Realm, "Realm in ticket within the AP_REQ of the KRB5Token not as expected.")
 	assert.Equal(t, testdata.TEST_PRINCIPALNAME_NAMESTRING, mt.APReq.Ticket.SName.NameString, "SName in ticket within the AP_REQ of the KRB5Token not as expected.")
 	assert.Equal(t, int32(18), mt.APReq.EncryptedAuthenticator.EType, "Authenticator within AP_REQ does not have the etype expected.")
+}
+
+func TestNewKRB5TokenUser2UserAPREQ(t *testing.T) {
+	t.Parallel()
+	creds := credentials.New("hftsai", testdata.TEST_REALM)
+	creds.SetCName(types.PrincipalName{NameType: nametype.KRB_NT_PRINCIPAL, NameString: testdata.TEST_PRINCIPALNAME_NAMESTRING})
+	cl := client.Client{
+		Credentials: creds,
+	}
+
+	var tkt messages.Ticket
+	b, err := hex.DecodeString(testdata.MarshaledKRB5ticket)
+	if err != nil {
+		t.Fatalf("Test vector read error: %v", err)
+	}
+	err = tkt.Unmarshal(b)
+	if err != nil {
+		t.Fatalf("Unmarshal error: %v", err)
+	}
+
+	key := types.EncryptionKey{
+		KeyType:  18,
+		KeyValue: make([]byte, 32),
+	}
+
+	mt, err := NewKRB5TokenUser2UserAPREQ(&cl, tkt, key, []int{gssapi.ContextFlagInteg, gssapi.ContextFlagConf})
+	if err != nil {
+		t.Fatalf("Error creating User2User KRB5Token: %v", err)
+	}
+
+	// Verify OID is User2User OID
+	assert.Equal(t, gssapi.OIDKRB5User2User.OID(), mt.OID, "KRB5Token OID should be User2User OID")
+	// Verify token ID is AP_REQ
+	assert.Equal(t, []byte{1, 0}, mt.tokID, "TokID not as expected")
+	// Verify message type is AP_REQ
+	assert.Equal(t, msgtype.KRB_AP_REQ, mt.APReq.MsgType, "KRB5Token AP_REQ does not have the right message type")
+	// Verify APOptionUseSessionKey is set
+	assert.True(t, types.IsFlagSet(&mt.APReq.APOptions, flags.APOptionUseSessionKey), "APOptionUseSessionKey flag should be set")
+	// Verify APOptionMutualRequired is set
+	assert.True(t, types.IsFlagSet(&mt.APReq.APOptions, flags.APOptionMutualRequired), "APOptionMutualRequired flag should be set")
+	// Verify ticket information
+	assert.Equal(t, testdata.TEST_REALM, mt.APReq.Ticket.Realm, "Realm in ticket within the AP_REQ not as expected")
+	assert.Equal(t, testdata.TEST_PRINCIPALNAME_NAMESTRING, mt.APReq.Ticket.SName.NameString, "SName in ticket within the AP_REQ not as expected")
+	assert.Equal(t, int32(18), mt.APReq.EncryptedAuthenticator.EType, "Authenticator within AP_REQ does not have the etype expected")
+}
+
+func TestNewKRB5TokenUser2UserAPREQ_MarshalUnmarshal(t *testing.T) {
+	t.Parallel()
+	creds := credentials.New("hftsai", testdata.TEST_REALM)
+	creds.SetCName(types.PrincipalName{NameType: nametype.KRB_NT_PRINCIPAL, NameString: testdata.TEST_PRINCIPALNAME_NAMESTRING})
+	cl := client.Client{
+		Credentials: creds,
+	}
+
+	var tkt messages.Ticket
+	b, err := hex.DecodeString(testdata.MarshaledKRB5ticket)
+	if err != nil {
+		t.Fatalf("Test vector read error: %v", err)
+	}
+	err = tkt.Unmarshal(b)
+	if err != nil {
+		t.Fatalf("Unmarshal error: %v", err)
+	}
+
+	key := types.EncryptionKey{
+		KeyType:  18,
+		KeyValue: make([]byte, 32),
+	}
+
+	// Create token
+	mt, err := NewKRB5TokenUser2UserAPREQ(&cl, tkt, key, []int{gssapi.ContextFlagInteg, gssapi.ContextFlagConf})
+	if err != nil {
+		t.Fatalf("Error creating User2User KRB5Token: %v", err)
+	}
+
+	// Marshal the token
+	mb, err := mt.Marshal()
+	if err != nil {
+		t.Fatalf("Error marshalling KRB5Token: %v", err)
+	}
+
+	// Unmarshal into a new token
+	var mt2 KRB5Token
+	err = mt2.Unmarshal(mb)
+	if err != nil {
+		t.Fatalf("Error unmarshalling KRB5Token: %v", err)
+	}
+
+	// Verify the unmarshalled token has the same properties
+	assert.Equal(t, gssapi.OIDKRB5User2User.OID(), mt2.OID, "Unmarshalled KRB5Token OID should be User2User OID")
+	assert.Equal(t, []byte{1, 0}, mt2.tokID, "Unmarshalled TokID not as expected")
+	assert.Equal(t, msgtype.KRB_AP_REQ, mt2.APReq.MsgType, "Unmarshalled KRB5Token AP_REQ does not have the right message type")
+	assert.True(t, types.IsFlagSet(&mt2.APReq.APOptions, flags.APOptionUseSessionKey), "Unmarshalled APOptionUseSessionKey flag should be set")
+	assert.True(t, types.IsFlagSet(&mt2.APReq.APOptions, flags.APOptionMutualRequired), "Unmarshalled APOptionMutualRequired flag should be set")
+	assert.Equal(t, testdata.TEST_REALM, mt2.APReq.Ticket.Realm, "Unmarshalled realm not as expected")
+	assert.Equal(t, testdata.TEST_PRINCIPALNAME_NAMESTRING, mt2.APReq.Ticket.SName.NameString, "Unmarshalled SName not as expected")
+}
+
+func TestNewKRB5TokenUser2UserAPREQ_WithDifferentFlags(t *testing.T) {
+	t.Parallel()
+	creds := credentials.New("hftsai", testdata.TEST_REALM)
+	creds.SetCName(types.PrincipalName{NameType: nametype.KRB_NT_PRINCIPAL, NameString: testdata.TEST_PRINCIPALNAME_NAMESTRING})
+	cl := client.Client{
+		Credentials: creds,
+	}
+
+	var tkt messages.Ticket
+	b, err := hex.DecodeString(testdata.MarshaledKRB5ticket)
+	if err != nil {
+		t.Fatalf("Test vector read error: %v", err)
+	}
+	err = tkt.Unmarshal(b)
+	if err != nil {
+		t.Fatalf("Unmarshal error: %v", err)
+	}
+
+	key := types.EncryptionKey{
+		KeyType:  18,
+		KeyValue: make([]byte, 32),
+	}
+
+	// Test with only ContextFlagInteg
+	mt, err := NewKRB5TokenUser2UserAPREQ(&cl, tkt, key, []int{gssapi.ContextFlagInteg})
+	if err != nil {
+		t.Fatalf("Error creating User2User KRB5Token: %v", err)
+	}
+
+	// Verify U2U-specific flags are still set regardless of GSSAPI flags
+	assert.True(t, types.IsFlagSet(&mt.APReq.APOptions, flags.APOptionUseSessionKey), "APOptionUseSessionKey should always be set for User2User")
+	assert.True(t, types.IsFlagSet(&mt.APReq.APOptions, flags.APOptionMutualRequired), "APOptionMutualRequired should always be set for User2User")
+
+	// Test with empty GSSAPI flags
+	mt2, err := NewKRB5TokenUser2UserAPREQ(&cl, tkt, key, []int{})
+	if err != nil {
+		t.Fatalf("Error creating User2User KRB5Token with empty flags: %v", err)
+	}
+
+	assert.True(t, types.IsFlagSet(&mt2.APReq.APOptions, flags.APOptionUseSessionKey), "APOptionUseSessionKey should be set even with empty GSSAPI flags")
+	assert.True(t, types.IsFlagSet(&mt2.APReq.APOptions, flags.APOptionMutualRequired), "APOptionMutualRequired should be set even with empty GSSAPI flags")
+}
+
+func TestNewKRB5TokenUser2UserAPREQ_IsAPReq(t *testing.T) {
+	t.Parallel()
+	creds := credentials.New("hftsai", testdata.TEST_REALM)
+	creds.SetCName(types.PrincipalName{NameType: nametype.KRB_NT_PRINCIPAL, NameString: testdata.TEST_PRINCIPALNAME_NAMESTRING})
+	cl := client.Client{
+		Credentials: creds,
+	}
+
+	var tkt messages.Ticket
+	b, err := hex.DecodeString(testdata.MarshaledKRB5ticket)
+	if err != nil {
+		t.Fatalf("Test vector read error: %v", err)
+	}
+	err = tkt.Unmarshal(b)
+	if err != nil {
+		t.Fatalf("Unmarshal error: %v", err)
+	}
+
+	key := types.EncryptionKey{
+		KeyType:  18,
+		KeyValue: make([]byte, 32),
+	}
+
+	mt, err := NewKRB5TokenUser2UserAPREQ(&cl, tkt, key, []int{gssapi.ContextFlagInteg})
+	if err != nil {
+		t.Fatalf("Error creating User2User KRB5Token: %v", err)
+	}
+
+	// Verify it's identified as an AP_REQ
+	assert.True(t, mt.IsAPReq(), "Token should be identified as AP_REQ")
+	assert.False(t, mt.IsAPRep(), "Token should not be identified as AP_REP")
+	assert.False(t, mt.IsKRBError(), "Token should not be identified as KRBError")
+	assert.False(t, mt.IsTGTReq(), "Token should not be identified as TGT_REQ")
+	assert.False(t, mt.IsTGTRep(), "Token should not be identified as TGT_REP")
 }

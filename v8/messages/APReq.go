@@ -142,18 +142,6 @@ func (a *APReq) Marshal() ([]byte, error) {
 // The service ticket encrypted part and authenticator will be decrypted as part of this operation.
 func (a *APReq) Verify(kt *keytab.Keytab, d time.Duration, cAddr types.HostAddress, snameOverride *types.PrincipalName) (bool, error) {
 	// Decrypt ticket's encrypted part with service key
-	//TODO decrypt with service's session key from its TGT is use-to-user. Need to figure out how to get TGT.
-	//if types.IsFlagSet(&a.APOptions, flags.APOptionUseSessionKey) {
-	//	err := a.Ticket.Decrypt(tgt.DecryptedEncPart.Key)
-	//	if err != nil {
-	//		return false, krberror.Errorf(err, krberror.DecryptingError, "error decrypting encpart of ticket provided using session key")
-	//	}
-	//} else {
-	//	err := a.Ticket.DecryptEncPart(*kt, &a.Ticket.SName)
-	//	if err != nil {
-	//		return false, krberror.Errorf(err, krberror.DecryptingError, "error decrypting encpart of service ticket provided")
-	//	}
-	//}
 	sname := &a.Ticket.SName
 	if snameOverride != nil {
 		sname = snameOverride
@@ -161,6 +149,52 @@ func (a *APReq) Verify(kt *keytab.Keytab, d time.Duration, cAddr types.HostAddre
 	err := a.Ticket.DecryptEncPart(kt, sname)
 	if err != nil {
 		return false, krberror.Errorf(err, krberror.DecryptingError, "error decrypting encpart of service ticket provided")
+	}
+
+	// Check time validity of ticket
+	ok, err := a.Ticket.Valid(d)
+	if err != nil || !ok {
+		return ok, err
+	}
+
+	// Check client's address is listed in the client addresses in the ticket
+	if len(a.Ticket.DecryptedEncPart.CAddr) > 0 {
+		//If client addresses are present check if any of them match the source IP that sent the APReq
+		//If there is no match return KRB_AP_ERR_BADADDR error.
+		if !types.HostAddressesContains(a.Ticket.DecryptedEncPart.CAddr, cAddr) {
+			return false, NewKRBError(a.Ticket.SName, a.Ticket.Realm, errorcode.KRB_AP_ERR_BADADDR, "client address not within the list contained in the service ticket")
+		}
+	}
+
+	// Decrypt authenticator with session key from ticket's encrypted part
+	err = a.DecryptAuthenticator(a.Ticket.DecryptedEncPart.Key)
+	if err != nil {
+		return false, NewKRBError(a.Ticket.SName, a.Ticket.Realm, errorcode.KRB_AP_ERR_BAD_INTEGRITY, "could not decrypt authenticator")
+	}
+
+	// Check CName in authenticator is the same as that in the ticket
+	if !a.Authenticator.CName.Equal(a.Ticket.DecryptedEncPart.CName) {
+		return false, NewKRBError(a.Ticket.SName, a.Ticket.Realm, errorcode.KRB_AP_ERR_BADMATCH, "CName in Authenticator does not match that in service ticket")
+	}
+
+	// Check the clock skew between the client and the service server
+	ct := a.Authenticator.CTime.Add(time.Duration(a.Authenticator.Cusec) * time.Microsecond)
+	t := time.Now().UTC()
+	if t.Sub(ct) > d || ct.Sub(t) > d {
+		return false, NewKRBError(a.Ticket.SName, a.Ticket.Realm, errorcode.KRB_AP_ERR_SKEW, fmt.Sprintf("clock skew with client too large. greater than %v seconds", d))
+	}
+	return true, nil
+}
+
+// VerifyUser2User verifies an AP_REQ for user-to-user authentication using the service's TGT session key.
+// This method should be used when the APOptionUseSessionKey flag is set in the AP_REQ, indicating that
+// the ticket is encrypted with the session key from the service's TGT rather than the service's long-term key.
+// The service ticket encrypted part and authenticator will be decrypted as part of this operation.
+func (a *APReq) VerifyUser2User(sessionKey types.EncryptionKey, d time.Duration, cAddr types.HostAddress) (bool, error) {
+	// Decrypt ticket's encrypted part with the TGT session key
+	err := a.Ticket.Decrypt(sessionKey)
+	if err != nil {
+		return false, krberror.Errorf(err, krberror.DecryptingError, "error decrypting encpart of ticket with session key for user-to-user authentication")
 	}
 
 	// Check time validity of ticket
